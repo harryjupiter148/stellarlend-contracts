@@ -12,7 +12,7 @@ use soroban_sdk::{
 };
 
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]  // Add Eq here
 pub struct PositionSummary {
     pub collateral: i128,
     pub debt: i128,
@@ -29,7 +29,7 @@ pub enum LendingError {
 pub struct LendingContract;
 
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]  // Add Eq here
 pub enum EmergencyState {
     Normal,
     Shutdown,
