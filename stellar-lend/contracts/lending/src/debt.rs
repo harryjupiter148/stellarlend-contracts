@@ -17,8 +17,8 @@ pub enum DebtError {
     InvalidAmount,
 }
 
-impl From<RoundingError> for DebtError {
-    fn from(_: RoundingError) -> Self {
+impl From<&'static str> for DebtError {
+    fn from(_: &'static str) -> Self {
         DebtError::Overflow
     }
 }
