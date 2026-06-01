@@ -287,8 +287,8 @@ impl LendingContract {
     ) -> Result<i128, Error> {
         liquidator.require_auth();
 
-        let col_key = ("col", borrower.clone());
-        let debt_key = ("debt", borrower.clone());
+        let col_key = DataKey::Collateral(borrower.clone());
+        let debt_key = DataKey::Debt(borrower.clone());
 
         let collateral: i128 = env.storage().persistent().get(&col_key).unwrap_or(0);
         let debt: i128 = env.storage().persistent().get(&debt_key).unwrap_or(0);
@@ -387,19 +387,24 @@ impl LendingContract {
         Ok(())
     }
 
-    /// Privileged function to update the global emergency state. Only callable by `admin` or `guardian`.
+    /// Privileged function to update the global emergency state.
+    /// If a guardian is configured, either the guardian or the admin may call this.
+    /// If no guardian is configured, this operation is unauthorized.
     pub fn set_emergency_state(env: Env, new_state: EmergencyState) {
-        let guardian = env
-            .storage()
-            .instance()
-            .get::<_, Address>(&DataKey::Guardian)
-            .unwrap_or_else(|| {
-                env.storage()
-                    .instance()
-                    .get::<_, Address>(&DataKey::Admin)
-                    .unwrap()
-            });
-        guardian.require_auth();
+        let guardian_opt: Option<Address> = env.storage().instance().get(&DataKey::Guardian);
+        let admin = Self::get_admin(env.clone());
+
+        match guardian_opt {
+            Some(guardian) => {
+                let auths = env.auths();
+                let is_admin_authorized = auths.iter().any(|(address, _)| address == &admin);
+                let is_guardian_authorized = auths.iter().any(|(address, _)| address == &guardian);
+                if !is_admin_authorized && !is_guardian_authorized {
+                    panic!("Unauthorized");
+                }
+            }
+            None => panic!("Unauthorized"),
+        }
 
         let old_state = get_emergency_state(&env);
         set_emergency_state_internal(&env, new_state);
@@ -506,7 +511,7 @@ impl LendingContract {
     /// Get user position summary: collateral, effective debt, and health factor.
     /// Health factor uses checked arithmetic to prevent overflow on calculation.
     pub fn get_position(env: Env, user: Address) -> PositionSummary {
-        let col_key = ("col", user.clone());
+        let col_key = DataKey::Collateral(user.clone());
         let col: i128 = env.storage().persistent().get(&col_key).unwrap_or(0);
         if col != 0 {
             extend_collateral_ttl(&env, &user);
@@ -531,12 +536,22 @@ impl LendingContract {
     }
 }
 
-fn extend_collateral_ttl(_env: &Env, _user: &Address) {
-    // TTL extension is handled by storage layer or can be implemented later.
+fn extend_collateral_ttl(env: &Env, user: &Address) {
+    let key = DataKey::Collateral(user.clone());
+    let extend_to = env.storage().max_ttl().min(PERSISTENT_TTL_LEDGERS);
+    let threshold = extend_to / 2 + 1;
+    if env.storage().persistent().has(&key) {
+        env.storage().persistent().extend_ttl(&key, threshold, extend_to);
+    }
 }
 
-fn extend_debt_ttl(_env: &Env, _user: &Address) {
-    // TTL extension is handled by storage layer or can be implemented later.
+fn extend_debt_ttl(env: &Env, user: &Address) {
+    let key = DataKey::Debt(user.clone());
+    let extend_to = env.storage().max_ttl().min(PERSISTENT_TTL_LEDGERS);
+    let threshold = extend_to / 2 + 1;
+    if env.storage().persistent().has(&key) {
+        env.storage().persistent().extend_ttl(&key, threshold, extend_to);
+    }
 }
 
 fn get_emergency_state(env: &Env) -> EmergencyState {
