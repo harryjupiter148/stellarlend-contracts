@@ -14,7 +14,7 @@ import type { RawPriceData, PriceData, ProviderConfig, HealthStatus } from '../s
  * Mock provider for testing
  */
 class MockProvider extends BasePriceProvider {
-    private mockPrices: Map<string, number> = new Map();
+    private mockPrices: Map<string, RawPriceData> = new Map();
     private shouldFail: boolean = false;
 
     constructor(
@@ -22,6 +22,7 @@ class MockProvider extends BasePriceProvider {
         priority: number,
         weight: number,
         prices: Record<string, number> = {},
+        volumes: Record<string, bigint> = {},
     ) {
         super({
             name,
@@ -33,7 +34,14 @@ class MockProvider extends BasePriceProvider {
         });
 
         Object.entries(prices).forEach(([asset, price]) => {
-            this.mockPrices.set(asset.toUpperCase(), price);
+            const upper = asset.toUpperCase();
+            this.mockPrices.set(upper, {
+                asset: upper,
+                price,
+                timestamp: Math.floor(Date.now() / 1000),
+                source: name,
+                volume24h: volumes[asset] ?? volumes[upper],
+            });
         });
     }
 
@@ -42,21 +50,24 @@ class MockProvider extends BasePriceProvider {
             throw new Error(`Mock provider ${this.name} failed`);
         }
 
-        const price = this.mockPrices.get(asset.toUpperCase());
-        if (price === undefined) {
+        const data = this.mockPrices.get(asset.toUpperCase());
+        if (data === undefined) {
             throw new Error(`Asset ${asset} not found in mock provider`);
         }
 
-        return {
-            asset: asset.toUpperCase(),
-            price,
-            timestamp: Math.floor(Date.now() / 1000),
-            source: this.name,
-        };
+        return { ...data, timestamp: Math.floor(Date.now() / 1000) };
     }
 
     setPrice(asset: string, price: number): void {
-        this.mockPrices.set(asset.toUpperCase(), price);
+        const upper = asset.toUpperCase();
+        const existing = this.mockPrices.get(upper);
+        this.mockPrices.set(upper, {
+            asset: upper,
+            price,
+            timestamp: Math.floor(Date.now() / 1000),
+            source: this.name,
+            volume24h: existing?.volume24h,
+        });
     }
 
     setFail(shouldFail: boolean): void {
