@@ -8,6 +8,13 @@ WASM_DIR="$REPO_ROOT/stellar-lend/target/wasm32-unknown-unknown/release"
 DEPLOYED_DIR="$SCRIPTS_DIR/deployed/testnet"
 CHECKSUM_FILE="$DEPLOYED_DIR/checksums.txt"
 
+# Capture output to a file alongside the test script for CI/inspection
+OUTPUT_FILE="$REPO_ROOT/scripts/tests/output.txt"
+# Ensure output file exists and is truncated
+: > "$OUTPUT_FILE"
+# Mirror all stdout/stderr to the output file while still printing to console
+exec > >(tee -a "$OUTPUT_FILE") 2>&1
+
 echo "Running deploy checksum tests"
 
 # Clean slate
