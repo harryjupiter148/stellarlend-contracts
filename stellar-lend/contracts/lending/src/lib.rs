@@ -3,6 +3,7 @@
 mod debt;
 pub mod rate_model;
 pub mod rounding_strategy;
+pub mod math;
 
 #[cfg(test)]
 mod interest_drift_regression_test;
@@ -22,6 +23,9 @@ const DEFAULT_DEPOSIT_CAP: i128 = 1_000_000_000_000;
 const HEALTH_FACTOR_SCALE: i128 = 10_000;
 const HEALTH_FACTOR_NO_DEBT: i128 = 100_000_000;
 pub const LIQUIDATION_THRESHOLD_BPS: i128 = 8000;
+const DEFAULT_ORACLE_MAX_AGE_SECS: u64 = 3600;
+const ORACLE_SIGNATURE_DOMAIN: &[u8] = b"StellarLendOracle";
+const BPS_DENOM: i128 = 10_000;
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -105,6 +109,11 @@ pub enum LendingError {
     NotInitialized = 1009,
     AlreadyInitialized = 1010,
     PositionHealthy = 1011,
+    StaleOracleTimestamp = 1012,
+    OraclePubkeyNotSet = 1013,
+    InvalidOracleSignature = 1014,
+    DeadlineExpired = 1015,
+    Shortfall = 1016,
     DebtCeilingExceeded = 2001,
     DepositCapExceeded = 2002,
     Overflow = 2003,
@@ -516,8 +525,8 @@ impl LendingContract {
             seized_collateral
         };
 
-        let new_debt = debt - actual_repay;
-        let new_col = collateral - final_seized;
+        let new_debt = debt.saturating_sub(actual_repay);
+        let new_col = collateral.saturating_sub(final_seized);
 
         let now = env.ledger().timestamp();
         let updated_position = DebtPosition {
@@ -786,7 +795,8 @@ impl LendingContract {
             extend_debt_ttl(&env, &user);
         }
         let debt = effective_debt(&position, env.ledger().timestamp(), DEFAULT_APR_BPS)
-            .unwrap_or(position.principal);
+            .unwrap_or(position.principal)
+            .max(0);
 
         if debt > 0 {
             col.checked_mul(LIQUIDATION_THRESHOLD_BPS)
@@ -924,6 +934,28 @@ fn current_borrow_rate(env: &Env) -> i128 {
         None => DEFAULT_APR_BPS,
     }
 }
+
+    #[contract]
+    pub struct MockAmm;
+    #[contractimpl]
+    impl MockAmm {
+        pub fn swap(_env: Env, _caller: Address, _in: Address, _out: Address, amount_in: i128, min_out: i128, _dead: u64) -> i128 {
+            let out = amount_in * 2;
+            if out < min_out {
+                panic!("SlippageExceeded");
+            }
+            out
+        }
+    }
+
+    #[contract]
+    pub struct BadAmm;
+    #[contractimpl]
+    impl BadAmm {
+        pub fn swap(_env: Env, _caller: Address, _in: Address, _out: Address, amount_in: i128, _min: i128, _dead: u64) -> i128 {
+            amount_in / 4
+        }
+    }
 
 #[cfg(test)]
 mod test {
@@ -1463,5 +1495,148 @@ mod test {
         let (env, client, _admin, _user) = setup();
         let m = client.get_protocol_metrics();
         assert_eq!(m.ledger, env.ledger().sequence());
+    }
+
+    #[test]
+    fn test_get_position_never_reports_negative_debt() {
+        let (env, client, _admin, user) = setup();
+        // Forcibly save a negative debt position to test the safety clamp
+        let position = DebtPosition {
+            principal: -500,
+            last_update: env.ledger().timestamp(),
+        };
+        save_debt(&env, &user, &position);
+        let pos = client.get_position(&user);
+        assert_eq!(pos.debt, 0, "Debt should be clamped to 0");
+    }
+
+    #[test]
+    fn test_liquidate_routed_success() {
+        let (env, client, admin, borrower) = setup();
+        let liquidator = Address::generate(&env);
+        let amm_router = env.register(MockAmm, ());
+        
+        let col_asset = Address::generate(&env);
+        let debt_asset = Address::generate(&env);
+        
+        client.deposit(&borrower, &1000);
+        client.borrow(&borrower, &800); 
+
+        let keypair = chrono_keypair();
+        let pubkey = BytesN::from_array(&env, &keypair.public.to_bytes());
+        client.set_oracle_pubkey(&pubkey);
+
+        let timestamp = env.ledger().timestamp();
+        let col_price = 50_000_000; 
+        let debt_price = 100_000_000; 
+        
+        let sig_col = sign_oracle_update(&env, &keypair, &col_asset, col_price, timestamp);
+        client.set_price(&admin, &col_asset, &col_price, &timestamp, &sig_col).unwrap();
+        
+        let sig_debt = sign_oracle_update(&env, &keypair, &debt_asset, debt_price, timestamp);
+        client.set_price(&admin, &debt_asset, &debt_price, &timestamp, &sig_debt).unwrap();
+
+        let min_out = 440;
+        let deadline = timestamp + 100;
+        
+        let res = client.liquidate_routed(
+            &liquidator,
+            &borrower,
+            &400,
+            &amm_router,
+            &col_asset,
+            &debt_asset,
+            &min_out,
+            &deadline,
+        );
+        assert_eq!(res, 400);
+        
+        let pos = client.get_position(&borrower);
+        assert_eq!(pos.debt, 400);
+        assert_eq!(pos.collateral, 120); 
+    }
+
+    #[test]
+    fn test_liquidate_routed_shortfall() {
+        let (env, client, admin, borrower) = setup();
+        let liquidator = Address::generate(&env);
+        let amm_router = env.register(BadAmm, ());
+        
+        let col_asset = Address::generate(&env);
+        let debt_asset = Address::generate(&env);
+        
+        client.deposit(&borrower, &1000);
+        client.borrow(&borrower, &800); 
+
+        let keypair = chrono_keypair();
+        let pubkey = BytesN::from_array(&env, &keypair.public.to_bytes());
+        client.set_oracle_pubkey(&pubkey);
+
+        let timestamp = env.ledger().timestamp();
+        let col_price = 50_000_000; 
+        let debt_price = 100_000_000; 
+        
+        let sig_col = sign_oracle_update(&env, &keypair, &col_asset, col_price, timestamp);
+        client.set_price(&admin, &col_asset, &col_price, &timestamp, &sig_col).unwrap();
+        
+        let sig_debt = sign_oracle_update(&env, &keypair, &debt_asset, debt_price, timestamp);
+        client.set_price(&admin, &debt_asset, &debt_price, &timestamp, &sig_debt).unwrap();
+
+        let min_out = 100;
+        let deadline = timestamp + 100;
+        
+        let res = client.try_liquidate_routed(
+            &liquidator,
+            &borrower,
+            &400,
+            &amm_router,
+            &col_asset,
+            &debt_asset,
+            &min_out,
+            &deadline,
+        );
+        assert!(matches!(res, Err(Ok(LendingError::Shortfall))));
+    }
+
+    #[test]
+    #[should_panic(expected = "SlippageExceeded")]
+    fn test_liquidate_routed_slippage() {
+        let (env, client, admin, borrower) = setup();
+        let liquidator = Address::generate(&env);
+        let amm_router = env.register(MockAmm, ());
+        
+        let col_asset = Address::generate(&env);
+        let debt_asset = Address::generate(&env);
+        
+        client.deposit(&borrower, &1000);
+        client.borrow(&borrower, &800); 
+
+        let keypair = chrono_keypair();
+        let pubkey = BytesN::from_array(&env, &keypair.public.to_bytes());
+        client.set_oracle_pubkey(&pubkey);
+
+        let timestamp = env.ledger().timestamp();
+        let col_price = 50_000_000; 
+        let debt_price = 100_000_000; 
+        
+        let sig_col = sign_oracle_update(&env, &keypair, &col_asset, col_price, timestamp);
+        client.set_price(&admin, &col_asset, &col_price, &timestamp, &sig_col).unwrap();
+        
+        let sig_debt = sign_oracle_update(&env, &keypair, &debt_asset, debt_price, timestamp);
+        client.set_price(&admin, &debt_asset, &debt_price, &timestamp, &sig_debt).unwrap();
+
+        let min_out = 9999999; 
+        let deadline = timestamp + 100;
+        
+        client.liquidate_routed(
+            &liquidator,
+            &borrower,
+            &400,
+            &amm_router,
+            &col_asset,
+            &debt_asset,
+            &min_out,
+            &deadline,
+        );
     }
 }
