@@ -48,6 +48,17 @@ This is the contract users, liquidators, and token contracts should treat as aut
 
 It does not own lending solvency state, debt balances, or collateral balances.
 
+### Constant-product invariant
+
+The AMM implementation enforces a constant-product invariant guard on all
+mutating operations (swaps and liquidity changes). Each path computes the
+pool product `k = reserve_a * reserve_b` before and after the mutation and
+asserts the expected monotonic direction: swaps and liquidity additions must
+not decrease `k` (fees are retained in the pool), while liquidity removals
+must not increase `k`. This check is implemented in the helper
+`assert_k_monotonic` in the `contracts/amm` crate to detect rounding or
+implementation errors and revert on violation.
+
 ### `hello-world`
 
 `hello-world` combines lending, AMM, bridge, governance, analytics, and monitoring concerns in one crate. Because it is outside the active workspace and duplicates functionality now split across maintained crates, it should be treated as historical/reference code rather than the deployment artifact.

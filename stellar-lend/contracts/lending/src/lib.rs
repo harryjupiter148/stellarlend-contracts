@@ -479,6 +479,11 @@ impl LendingContract {
     }
 }
 
+fn acquire_reentrancy_lock(env: &Env) {
+    let reentrancy_lock_key = Symbol::new(env, "reent_l");
+    env.storage().temporary().set(&reentrancy_lock_key, &true);
+}
+
 fn get_pause_data(env: &Env, operation: PauseType) -> PauseState {
     env.storage()
         .instance()
