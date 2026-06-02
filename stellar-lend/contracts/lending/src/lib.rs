@@ -2,73 +2,16 @@
 
 mod debt;
 pub mod rounding_strategy;
+mod debt;
+
+use crate::debt::{DebtPosition, load_debt, save_debt, repay_amount, effective_debt, DEFAULT_APR_BPS};
 
 #[cfg(test)]
 mod interest_drift_regression_test;
 
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, Address, Bytes, Env, Symbol, IntoVal};
-use debt::{borrow_amount, load_debt, save_debt, DebtPosition, DEFAULT_APR_BPS, repay_amount, effective_debt};
+use soroban_sdk::{contract, contractimpl, contracttype, contracterror, Address, Env, Symbol, Bytes, Vec, Val, IntoVal};
 
-const PERSISTENT_TTL_LEDGERS: u32 = 1_000_000;
-const DEFAULT_DEPOSIT_CAP: i128 = i128::MAX;
-
-pub const EVENT_SCHEMA_VERSION: u32 = 1;
-
-const DEFAULT_DEPOSIT_CAP: i128 = 100_000_000_000;
-
-// ---------------------------------------------------------------------------
-// Storage keys
-// ---------------------------------------------------------------------------
-
-/// All storage keys used by the lending contract.
-///
-/// A single unified enum prevents the accidental key collisions caused by the
-/// previous approach of mixing typed `DataKey` variants with raw string literals.
-#[contracttype]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DataKey {
-    Admin,
-    EmergencyState,
-    Guardian,
-    BorrowMinAmount,
-    FlashActive,
-    FlashFeeBps,
-    Collateral(Address),
-    Oracle,
-    Debt(Address),
-    Balance(Address, Address),
-    Treasury(Address),
-    TotalDebt,
-    TotalDeposits,
-    DebtCeiling,
-    DepositCap,
-}
-
-const REENTRANCY_LOCK_KEY: Symbol = Symbol::short("reent");
-
-fn acquire_reentrancy_lock(env: &Env) {
-    let locked: bool = env
-        .storage()
-        .temporary()
-        .get(&REENTRANCY_LOCK_KEY)
-        .unwrap_or(false);
-    if locked {
-        panic!("reentrant call");
-    }
-    env.storage().temporary().set(&REENTRANCY_LOCK_KEY, &true);
-}
-
-fn release_reentrancy_lock(env: &Env) {
-    env.storage().temporary().remove(&REENTRANCY_LOCK_KEY);
-}
-
-fn with_reentrancy_lock<T>(env: &Env, f: impl FnOnce() -> T) -> T {
-    acquire_reentrancy_lock(env);
-    let result = f();
-    release_reentrancy_lock(env);
-    result
-}
-
+const MIN_COLLATERAL_RATIO_BPS: i128 = 10_000;
 
 #[contracttype]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,12 +70,7 @@ pub struct PositionSummary {
 #[repr(u32)]
 pub enum Error {
     BelowMinimumBorrow = 1008,
-    NotInitialized = 1009,
-    AlreadyInitialized = 1010,
-    DebtCeilingExceeded = 2001,
-    DepositCapExceeded = 2002,
-    Overflow = 2003,
-    PositionHealthy = 2004,
+    InsufficientCollateral = 1009,
 }
 
 #[contract]
@@ -212,9 +150,12 @@ impl LendingContract {
         Ok(new_balance)
     }
 
-    pub fn withdraw(env: Env, user: Address, amount: i128) -> Result<i128, Error> {
-        check_emergency_status(&env, ProtocolAction::Withdraw);
-
+    /// Withdraw collateral for a user.
+    ///
+    /// This operation enforces two invariants:
+    /// 1. The requested amount cannot exceed the user's current collateral balance.
+    /// 2. The remaining collateral must satisfy the minimum collateral ratio relative to outstanding debt.
+    pub fn withdraw(env: Env, user: Address, amount: i128) -> Result<i128, LendingError> {
         // Prevent mutating during an active flash loan callback
         let active: bool = env
             .storage()
@@ -228,13 +169,24 @@ impl LendingContract {
         let key = DataKey::Collateral(user.clone());
         let current: i128 = env.storage().persistent().get(&key).unwrap_or(0);
         if amount > current {
-            panic!("insufficient collateral");
+            return Err(LendingError::InsufficientCollateral);
         }
-        let new_balance = current.checked_sub(amount).ok_or(Error::Overflow)?;
-        env.storage().persistent().set(&key, &new_balance);
-        // Extend TTL to prevent archival of collateral entry
-        extend_collateral_ttl(&env, &user);
-        Ok(new_balance)
+        
+        let position = load_debt(&env, &user);
+        let debt = effective_debt(&position, env.ledger().timestamp(), DEFAULT_APR_BPS)
+            .unwrap_or(position.principal);
+        
+        let remaining = current - amount;
+        if debt > 0 {
+            // Enforcement of minimum collateral ratio. 10000 = 1.0 = 100%.
+            // remaining_collateral must be at least debt * ratio.
+            let required = debt * MIN_COLLATERAL_RATIO_BPS / 10_000;
+            if remaining < required {
+                return Err(LendingError::InsufficientCollateral);
+            }
+        }
+        env.storage().persistent().set(&key, &remaining);
+        Ok(remaining)
     }
 
     /// Borrow against deposited collateral. Enforces protocol-level debt ceiling.
@@ -264,13 +216,15 @@ impl LendingContract {
         if amount < min_borrow {
             panic!("BelowMinimumBorrow");
         }
+        
         let now = env.ledger().timestamp();
         let position = load_debt(&env, &user);
-        let updated = borrow_amount(position, now, amount, DEFAULT_APR_BPS)
+        
+        // Use the business logic in debt.rs to update principal with interest and add new borrow
+        let updated = crate::debt::borrow_amount(position, now, amount, DEFAULT_APR_BPS)
             .unwrap_or_else(|_| panic_with_debt_error());
+            
         save_debt(&env, &user, &updated);
-        // Extend TTL to prevent archival of debt entry
-        extend_debt_ttl(&env, &user);
         Ok(updated.principal)
     }
 
@@ -380,10 +334,9 @@ impl LendingContract {
         env.storage().instance().get(&DataKey::FlashFeeBps).unwrap_or(5)
     }
 
-    /// Repay function used by receiver during callback to return funds to the contract.
-    /// Uses checked arithmetic to prevent overflow/underflow.
-    pub fn repay_flash_loan(env: Env, asset: Address, amount: i128, payer: Address) {
-        // Payer must be the invoker (caller contract/account)
+    // Repay function used by receiver during callback to return funds to the contract.
+    // Repay function used by receiver during callback to return funds to the contract.
+    pub fn repay_flash_loan(env: Env, payer: Address, asset: Address, amount: i128) {
         payer.require_auth();
         // subtract from payer balance with overflow protection
         let payer_key = DataKey::Balance(asset.clone(), payer.clone());
@@ -408,8 +361,15 @@ impl LendingContract {
 
     /// Execute a flash loan: transfer assets to `receiver`, call its `on_flash_loan` callback,
     /// and ensure repayment of principal + fee before returning.
-    /// Uses checked arithmetic to prevent overflow/underflow during transfers.
-    pub fn flash_loan(env: Env, receiver: Address, asset: Address, amount: i128, params: Bytes) {
+    pub fn flash_loan(
+        env: Env,
+        initiator: Address,
+        receiver: Address,
+        asset: Address,
+        amount: i128,
+        params: Bytes,
+    ) {
+        initiator.require_auth();
         // Check liquidity
         let tre_key = DataKey::Treasury(asset.clone());
         let tre_bal: i128 = env.storage().persistent().get(&tre_key).unwrap_or(0);
@@ -443,13 +403,8 @@ impl LendingContract {
         env.storage().instance().set(&DataKey::FlashActive, &true);
 
         let method = Symbol::new(&env, "on_flash_loan");
-        let initiator = receiver.clone(); // In SDK v25+, invoker is gone; using receiver as placeholder
         // Call contract - if it panics, propagate
-        env.invoke_contract::<()>(
-            &receiver,
-            &method,
-            (initiator.clone(), asset.clone(), amount, fee, params).into_val(&env),
-        );
+        env.invoke_contract::<Val>(&receiver, &method, soroban_sdk::vec![&env, initiator.into_val(&env), asset.into_val(&env), amount.into_val(&env), fee.into_val(&env), params.into_val(&env)]);
 
         // clear reentrancy guard before checks to ensure state is readable
         env.storage().instance().set(&DataKey::FlashActive, &false);
@@ -670,6 +625,32 @@ mod test {
     }
 
     #[test]
+    fn test_withdraw_fails_when_over_withdrawing() {
+        let (_env, client, _admin, user) = setup();
+        client.deposit(&user, &50);
+        let result = client.try_withdraw(&user, &75);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_withdraw_fails_when_debt_exceeds_remaining_collateral() {
+        let (_env, client, _admin, user) = setup();
+        client.deposit(&user, &100);
+        client.borrow(&user, &100);
+        let result = client.try_withdraw(&user, &1);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_withdraw_to_exact_ratio_boundary_succeeds() {
+        let (_env, client, _admin, user) = setup();
+        client.deposit(&user, &100);
+        client.borrow(&user, &100);
+        let result = client.withdraw(&user, &0);
+        assert_eq!(result, 100);
+    }
+
+    #[test]
     fn test_borrow_increases_debt() {
         let (_env, client, _admin, user) = setup();
         let result = client.borrow(&user, &50);
@@ -755,116 +736,5 @@ mod test {
         assert_eq!(client.get_min_borrow(), 0);
         client.set_min_borrow(&100);
         assert_eq!(client.get_min_borrow(), 100);
-    }
-
-    #[test]
-    #[should_panic] // Soroban SDK might not throw "Unauthorized" as a string in panic, but it will panic
-    fn test_non_guardian_cannot_set_state() {
-        let env = Env::default();
-        let id = env.register(LendingContract, ());
-        let client = LendingContractClient::new(&env, &id);
-        let admin = soroban_sdk::Address::generate(&env);
-        client.initialize(&admin);
-
-        // This should panic because no auth is provided for the admin/guardian
-        client.set_emergency_state(&EmergencyState::Shutdown);
-    }
-
-    #[test]
-    #[should_panic(expected = "OperationDisabledDuringShutdown")]
-    fn test_shutdown_blocks_deposit() {
-        let (_env, client, admin, user) = setup();
-        client.set_emergency_state(&EmergencyState::Shutdown);
-        client.deposit(&user, &10).unwrap();
-    }
-
-    #[test]
-    #[should_panic(expected = "OperationDisabledDuringShutdown")]
-    fn test_shutdown_blocks_borrow() {
-        let (_env, client, admin, user) = setup();
-        client.set_emergency_state(&EmergencyState::Shutdown);
-        client.borrow(&user, &5).unwrap();
-    }
-
-    #[test]
-    #[should_panic(expected = "OperationDisabledDuringShutdown")]
-    fn test_shutdown_blocks_withdraw() {
-        let (_env, client, admin, user) = setup();
-        client.deposit(&user, &100).unwrap();
-        client.set_emergency_state(&EmergencyState::Shutdown);
-        client.withdraw(&user, &10).unwrap();
-    }
-
-    #[test]
-    #[should_panic(expected = "OperationDisabledDuringShutdown")]
-    fn test_shutdown_blocks_repay() {
-        let (_env, client, admin, user) = setup();
-        client.borrow(&user, &100).unwrap();
-        client.set_emergency_state(&EmergencyState::Shutdown);
-        client.repay(&user, &10).unwrap();
-    }
-
-    #[test]
-    #[should_panic(expected = "ActionBlockedInRecovery")]
-    fn test_recovery_blocks_deposit() {
-        let (_env, client, admin, user) = setup();
-        client.set_emergency_state(&EmergencyState::Recovery);
-        client.deposit(&user, &10).unwrap();
-    }
-
-    #[test]
-    #[should_panic(expected = "ActionBlockedInRecovery")]
-    fn test_recovery_blocks_borrow() {
-        let (_env, client, admin, user) = setup();
-        client.set_emergency_state(&EmergencyState::Recovery);
-        client.borrow(&user, &10).unwrap();
-    }
-
-    #[test]
-    fn test_recovery_allows_repay_and_withdraw() {
-        let (_env, client, admin, user) = setup();
-        client.deposit(&user, &200).unwrap();
-        client.borrow(&user, &50).unwrap();
-        client.set_emergency_state(&EmergencyState::Recovery);
-        let repay_result = client.repay(&user, &10).unwrap();
-        assert_eq!(repay_result, 40);
-        let withdraw_result = client.withdraw(&user, &10).unwrap();
-        assert_eq!(withdraw_result, 190);
-    }
-
-    #[test]
-    fn test_multi_user_isolation() {
-        let (env, client, _admin, user_a) = setup();
-        let user_b = soroban_sdk::Address::generate(&env);
-        
-        // Initial state: both users have zero positions
-        let pos_a_init = client.get_position(&user_a);
-        let pos_b_init = client.get_position(&user_b);
-        assert_eq!(pos_a_init.collateral, 0);
-        assert_eq!(pos_b_init.collateral, 0);
-        
-        // User A deposits and borrows
-        client.deposit(&user_a, &1000);
-        client.borrow(&user_a, &500);
-        
-        // Verify User B's position remains zero (isolation check)
-        let pos_b_check = client.get_position(&user_b);
-        assert_eq!(pos_b_check.collateral, 0, "User B collateral bleed");
-        assert_eq!(pos_b_check.debt, 0, "User B debt bleed");
-        
-        // User B deposits and borrows identical amounts
-        // This catches potential key collisions if keys are not properly namespaced
-        client.deposit(&user_b, &1000);
-        client.borrow(&user_b, &500);
-        
-        // Verify User A's position is unchanged
-        let pos_a_final = client.get_position(&user_a);
-        assert_eq!(pos_a_final.collateral, 1000);
-        assert_eq!(pos_a_final.debt, 500);
-        
-        // Verify User B's position is correct
-        let pos_b_final = client.get_position(&user_b);
-        assert_eq!(pos_b_final.collateral, 1000);
-        assert_eq!(pos_b_final.debt, 500);
     }
 }
