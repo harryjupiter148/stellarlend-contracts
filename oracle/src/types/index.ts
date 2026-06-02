@@ -63,6 +63,8 @@ export enum ValidationErrorCode {
     PRICE_NEGATIVE = 'PRICE_NEGATIVE',
     PRICE_STALE = 'PRICE_STALE',
     PRICE_DEVIATION_TOO_HIGH = 'PRICE_DEVIATION_TOO_HIGH',
+    PRICE_BELOW_MIN = 'PRICE_BELOW_MIN',
+    PRICE_ABOVE_MAX = 'PRICE_ABOVE_MAX',
     INVALID_ASSET = 'INVALID_ASSET',
     SOURCE_UNAVAILABLE = 'SOURCE_UNAVAILABLE',
 }
@@ -107,11 +109,18 @@ export interface ContractUpdateResult {
 /**
  * Service configuration
  */
+export interface AssetPriceBounds {
+    minPrice: number;
+    maxPrice: number;
+}
+
 export interface OracleServiceConfig {
     stellarNetwork: 'testnet' | 'mainnet';
     stellarRpcUrl: string;
     contractId: string;
     adminSecretKey: string;
+    adminApiPort: number;
+    adminHmacSecret?: string;
     updateIntervalMs: number;
     maxPriceDeviationPercent: number;
     priceStaleThresholdSeconds: number;
@@ -119,6 +128,7 @@ export interface OracleServiceConfig {
     redisUrl?: string;
     logLevel: 'debug' | 'info' | 'warn' | 'error';
     providers: ProviderConfig[];
+    priceBounds: Record<SupportedAsset, AssetPriceBounds>;
 }
 
 /**

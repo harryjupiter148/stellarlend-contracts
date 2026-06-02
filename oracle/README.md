@@ -41,6 +41,9 @@ cp .env.example .env
 | `CACHE_TTL_SECONDS` | Cache TTL in seconds (default: 30) | No |
 | `UPDATE_INTERVAL_MS` | Price update interval (default: 60000) | No |
 | `MAX_PRICE_DEVIATION_PERCENT` | Max price deviation % (default: 10) | No |
+| `PRICE_BOUNDS_JSON` | Optional JSON map of per-asset min/max bounds | No |
+| `ADMIN_API_PORT` | HTTP port for secure admin operations | No |
+| `ADMIN_HMAC_SECRET` | HMAC secret used to sign admin reload requests | No |
 | `LOG_LEVEL` | Logging: debug, info, warn, error | No |
 
 ## Usage
@@ -57,6 +60,24 @@ npm run dev
 npm run build
 npm start
 ```
+
+### Admin reload endpoint
+
+The oracle service can expose a secure admin endpoint when `ADMIN_API_PORT` is configured.
+Requests to `POST /reload-config` must include an `x-signature` header containing a hex HMAC-SHA256 over the raw request body using `ADMIN_HMAC_SECRET`.
+The payload may include `validatorConfig` updates and/or asset-specific `bounds` to tighten min/max price ranges.
+
+Example payload:
+
+```json
+{
+  "bounds": {
+    "XLM": { "minPrice": 0.1, "maxPrice": 1000000 }
+  }
+}
+```
+
+This endpoint is intended for emergency tightening of bounds without restarting the service.
 
 ### Testing
 
