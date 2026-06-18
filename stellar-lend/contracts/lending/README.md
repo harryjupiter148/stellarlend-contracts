@@ -101,13 +101,19 @@ Normal ──► Shutdown ──► Recovery ──► Normal
 
 | Variant | Code | Description |
 |---|---|---|
+| `LendingError::InvalidAmount` | 1001 | Amount is zero or negative. |
+| `LendingError::Overflow` | 1002 | Checked arithmetic overflow during the operation. |
+| `LendingError::Unauthorized` | 1003 | Caller lacks permissions for this operation. |
 | `LendingError::BelowMinimumBorrow` | 1008 | Borrow amount is below the protocol minimum. |
 | `LendingError::NotInitialized` | 1009 | Contract has not been initialized. |
 | `LendingError::AlreadyInitialized` | 1010 | `initialize` called on an already-live contract. |
+| `LendingError::PositionHealthy` | 1011 | Liquidation rejected — health factor is sufficient. |
 | `LendingError::DebtCeilingExceeded` | 2001 | Borrow would exceed the global debt ceiling. |
 | `LendingError::DepositCapExceeded` | 2002 | Deposit would exceed the total deposit cap. |
-| `LendingError::Overflow` | 2003 | Checked arithmetic overflow during the operation. |
-| `Error::PositionHealthy` | 2004 | Liquidation rejected — health factor is sufficient. |
+| `LendingError::InvalidFeeBps` | 2005 | Flash loan fee is outside the permitted range. |
+| `LendingError::InvalidOracleSignature` | 5001 | Oracle price update signature is invalid. |
+| `LendingError::StaleOracleTimestamp` | 5002 | Oracle price update is too old. |
+| `LendingError::OraclePubkeyNotSet` | 5003 | Oracle public key is missing from storage. |
 
 ---
 

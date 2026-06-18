@@ -168,8 +168,6 @@ mod test {
         use proptest::prelude::*;
 
         proptest! {
-            #![proptest_config = proptest::test_runner::Config::with_cases(256)]
-
             #[test]
             fn borrow_rate_monotonic_in_utilization(
                 util_a in 0i128..=20_000i128,
@@ -179,17 +177,13 @@ mod test {
                 let rate_a = compute_borrow_rate(util_a, &p);
                 let rate_b = compute_borrow_rate(util_b, &p);
                 if util_a <= util_b {
-                    prop_assert!(
+                    assert!(
                         rate_a <= rate_b,
                         "rate decreased: util {} -> {} gave rate {} -> {}",
                         util_a, util_b, rate_a, rate_b
                     );
                 }
             }
-        }
-
-        proptest! {
-            #![proptest_config = proptest::test_runner::Config::with_cases(256)]
 
             #[test]
             fn borrow_rate_always_between_floor_and_ceiling(
@@ -197,23 +191,19 @@ mod test {
             ) {
                 let p = RateParams::default();
                 let rate = compute_borrow_rate(util, &p);
-                prop_assert!(
+                assert!(
                     rate >= p.rate_floor_bps,
                     "rate {} below floor {}",
                     rate,
                     p.rate_floor_bps
                 );
-                prop_assert!(
+                assert!(
                     rate <= p.rate_ceiling_bps,
                     "rate {} above ceiling {}",
                     rate,
                     p.rate_ceiling_bps
                 );
             }
-        }
-
-        proptest! {
-            #![proptest_config = proptest::test_runner::Config::with_cases(256)]
 
             #[test]
             fn borrow_rate_non_negative(
@@ -221,12 +211,8 @@ mod test {
             ) {
                 let p = RateParams::default();
                 let rate = compute_borrow_rate(util, &p);
-                prop_assert!(rate >= 0, "negative rate {}", rate);
+                assert!(rate >= 0, "negative rate {}", rate);
             }
-        }
-
-        proptest! {
-            #![proptest_config = proptest::test_runner::Config::with_cases(256)]
 
             #[test]
             fn borrow_rate_value_stable_across_same_utilization(
@@ -235,7 +221,7 @@ mod test {
                 let p = RateParams::default();
                 let rate_1 = compute_borrow_rate(util, &p);
                 let rate_2 = compute_borrow_rate(util, &p);
-                prop_assert_eq!(rate_1, rate_2, "non-deterministic rate");
+                assert_eq!(rate_1, rate_2, "non-deterministic rate");
             }
         }
     }

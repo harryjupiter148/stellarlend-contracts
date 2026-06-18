@@ -101,13 +101,20 @@ pub enum EmergencyState {
 
 | Code | Variant | Meaning | Suggested UI Message |
 |------|---------|---------|----------------------|
+| 1001 | `LendingError::InvalidAmount` | Amount must be positive | "Please enter a valid amount." |
+| 1002 | `LendingError::Overflow` | Calculation exceeded storage limits | "Result too large. Try a smaller amount." |
+| 1003 | `LendingError::Unauthorized` | Caller lacks permission | "You are not authorized for this action." |
 | 1008 | `LendingError::BelowMinimumBorrow` | Borrow amount below protocol minimum | "Amount is below the minimum borrow. Please increase your amount." |
 | 1009 | `LendingError::NotInitialized` | Contract not yet initialized | "Contract is not ready. Contact the administrator." |
 | 1010 | `LendingError::AlreadyInitialized` | `initialize` called twice | "Contract already initialized." |
+| 1011 | `LendingError::PositionHealthy` | Liquidation rejected — position is healthy | "This position cannot be liquidated." |
 | 2001 | `LendingError::DebtCeilingExceeded` | Borrow would exceed global debt ceiling | "Protocol debt limit reached. Try a smaller amount." |
 | 2002 | `LendingError::DepositCapExceeded` | Deposit would exceed total cap | "Deposit cap reached. Try a smaller amount." |
-| 2003 | `LendingError::Overflow` | Checked arithmetic would overflow | "Arithmetic error. Amount may be too large." |
-| 2004 | `Error::PositionHealthy` | Liquidation rejected — position is healthy | "This position cannot be liquidated." |
+| 2005 | `LendingError::InvalidFeeBps` | Flash loan fee out of range | "Fee must be between 0 and 10%." |
+| 2007 | `LendingError::InsufficientCollateral` | Collateral too low | "Insufficient collateral for this action." |
+| 5001 | `LendingError::InvalidOracleSignature` | Bad oracle signature | "Oracle signature verification failed." |
+| 5002 | `LendingError::StaleOracleTimestamp` | Oracle update too old | "Oracle price is outdated." |
+| 5003 | `LendingError::OraclePubkeyNotSet` | Oracle key missing | "System error: Oracle key not configured." |
 
 ---
 
