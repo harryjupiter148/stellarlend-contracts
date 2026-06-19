@@ -132,7 +132,7 @@ Removes expired, unexecuted proposal records and their approval vectors from con
 | `get_ms_threshold(env)` | `u32` | Approval threshold (default `1`) |
 | `get_ms_proposal(env, id)` | `Option<Proposal>` | Proposal by ID |
 | `get_ms_approvals(env, id)` | `Option<Vec<Address>>` | Approvals for a proposal |
-| `get_default_proposal_expiry_ledgers(env)` | `u32` | Default proposal lifetime used by the multisig crate |
+| `get_default_expiry_ledgers(env)` | `u32` | Default proposal lifetime used by the multisig crate |
 
 ---
 
@@ -367,6 +367,40 @@ If a malicious proposal reaches the approval threshold:
 3. Cancel any proposals that were approved by the compromised key if their
    legitimacy is in doubt.
 
+
+## Proposal Lifecycle Test Coverage
+
+The `stellarlend-multisig` crate ships a `#[cfg(test)]` module covering every error variant and timing boundary in the proposal flow. Run with:
+
+```bash
+cargo test -p stellarlend-multisig
+```
+
+### Key scenarios
+
+| Test | Error variant asserted |
+|------|----------------------|
+| `test_execute_proposal_double_execution` | `ProposalAlreadyExecuted` |
+| `test_execute_proposal_not_found` | `ProposalNotFound` |
+| `test_execute_proposal_before_eta_rejected` | `ProposalNotReady` |
+| `test_execute_at_exact_eta_boundary` | `ProposalNotReady` (boundary −1); success (boundary) |
+| `test_execute_expired_proposal_rejected` | `ProposalExpired` |
+| `test_execute_at_expiry_boundary` | success at boundary; `ProposalExpired` at boundary +1 |
+| `test_apply_threshold_change_before_delay` | `DelayNotElapsed` |
+| `test_apply_at_exact_min_delay_boundary` | `DelayNotElapsed` (boundary −1); success (boundary) |
+| `test_queue_threshold_change_zero_threshold` | `InvalidThreshold` |
+| `test_create_proposal_invalid_threshold` | `InvalidThreshold` |
+| `test_apply_threshold_change_no_queued_change` | `NoQueuedChange` |
+| `test_initialize_already_initialized` | `AlreadyInitialized` |
+| `test_queue_threshold_change_unauthorized` | host-level abort (`#[should_panic]`) |
+| `test_apply_threshold_change_unauthorized` | host-level abort (`#[should_panic]`) |
+
+### Timing boundary invariants
+
+- `DelayNotElapsed` until `current_ledger >= eta_ledger` (where `eta_ledger = queue_ledger + 600 000`).
+- `ProposalNotReady` until `current_ledger >= proposal.eta_ledger`.
+- `ProposalExpired` when `current_ledger > proposal.expires_at_ledger`; the boundary ledger itself is still valid.
+- `ProposalAlreadyExecuted` on any second call to `execute_proposal` for an `executed = true` proposal — no amount of ledger advancement can re-enable execution.
 
 ### Snapshot Testing
 
