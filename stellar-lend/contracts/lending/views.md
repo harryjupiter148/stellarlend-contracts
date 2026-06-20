@@ -39,6 +39,16 @@ This document describes the view functions for user collateral value, debt value
   - No debt: returns `HEALTH_FACTOR_NO_DEBT` (100_000_000), meaning "healthy".
   - Overflow in calculation: returns `i128::MAX`.
 
+### Pinned edge cases
+
+The `health_factor_edge_test` suite pins both `get_position().health_factor` and
+`get_health_factor(user)` for the boundary cases liquidation bots depend on:
+
+- zero collateral with non-zero debt returns exactly `0`;
+- collateral exactly at the 80% liquidation threshold returns `10000`;
+- collateral just past the checked-multiply boundary returns `i128::MAX` instead of wrapping;
+- zero debt returns the `HEALTH_FACTOR_NO_DEBT` sentinel even when collateral exists.
+
 ---
 
 ## 3. `get_debt_position(user: Address) -> DebtPosition`

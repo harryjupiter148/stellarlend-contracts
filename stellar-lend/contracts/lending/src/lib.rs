@@ -10,6 +10,8 @@ mod deposit_accounting_test;
 #[cfg(test)]
 mod error_codes_test;
 #[cfg(test)]
+mod health_factor_edge_test;
+#[cfg(test)]
 mod interest_drift_regression_test;
 #[cfg(test)]
 mod rounding_drift_test;
