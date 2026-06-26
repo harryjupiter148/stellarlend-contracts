@@ -15,7 +15,9 @@
 //! Note: `liquidate` does not call `check_emergency_status` and is therefore
 //! not gated by emergency state. See the dedicated test below.
 
-use crate::{EmergencyState, EmergencyStateChangedEvent, LendingContract, LendingContractClient};
+use crate::{
+    EmergencyState, EmergencyStateChangedEvent, LendingContract, LendingContractClient,
+};
 use soroban_sdk::{
     events::Event,
     testutils::{Address as _, Events, MockAuth, MockAuthInvoke},
@@ -243,12 +245,18 @@ fn shutdown_blocks_repay() {
 /// hf = collateral(100) * 8_000 / debt(200) = 4_000 < 10_000 → unhealthy
 #[test]
 fn shutdown_does_not_block_liquidation() {
-    let (env, client, _cid, _admin, _guardian, user) = setup_with_guardian();
+    let (env, client, cid, _admin, _guardian, user) = setup_with_guardian();
+    let debt_asset = env.register(crate::liquidate_transfer_test::MockToken, ());
+    let collateral_asset = env.register(crate::liquidate_transfer_test::MockToken, ());
+    let debt_token = crate::liquidate_transfer_test::MockTokenClient::new(&env, &debt_asset);
+    let collateral_token = crate::liquidate_transfer_test::MockTokenClient::new(&env, &collateral_asset);
+    let liquidator = Address::generate(&env);
+    debt_token.mint(&liquidator, &1000);
+    collateral_token.mint(&cid, &1000);
     client.deposit(&user, &100);
     client.borrow(&user, &200);
     client.set_emergency_state(&EmergencyState::Shutdown);
-    let liquidator = Address::generate(&env);
-    let result = client.try_liquidate(&liquidator, &user, &100);
+    let result = client.try_liquidate(&liquidator, &user, &debt_asset, &collateral_asset, &100);
     assert!(
         result.is_ok(),
         "liquidation should not be blocked by Shutdown (no check_emergency_status call)"

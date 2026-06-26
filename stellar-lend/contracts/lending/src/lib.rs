@@ -10,6 +10,8 @@ mod admin_setters_dedupe_test;
 #[cfg(test)]
 mod deposit_accounting_test;
 #[cfg(test)]
+mod liquidate_transfer_test;
+#[cfg(test)]
 mod emergency_state_matrix_test;
 #[cfg(test)]
 mod error_codes_test;
@@ -31,6 +33,7 @@ use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, Address, Bytes, BytesN,
     Env, IntoVal, Symbol, Val,
 };
+use soroban_sdk::token::Client as TokenClient;
 
 const PERSISTENT_TTL_LEDGERS: u32 = 1_000_000;
 const DEFAULT_DEPOSIT_CAP: i128 = 1_000_000_000_000;
@@ -484,13 +487,28 @@ impl LendingContract {
         Ok(updated.principal)
     }
 
+    /// Liquidate an undercollateralized position using checks-effects-interactions ordering.
+    /// Storage is updated after validation and before token transfers so any transfer failure
+    /// reverts the whole liquidation atomically.
     pub fn liquidate(
         env: Env,
         liquidator: Address,
         borrower: Address,
+        debt_asset: Address,
+        collateral_asset: Address,
         amount: i128,
     ) -> Result<i128, LendingError> {
         liquidator.require_auth();
+
+        let active: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::FlashActive)
+            .unwrap_or(false);
+        if active {
+            panic!("FlashLoanReentrancy");
+        }
+
         let col_key = DataKey::Collateral(borrower.clone());
 
         let collateral: i128 = env.storage().persistent().get(&col_key).unwrap_or(0);
@@ -552,6 +570,15 @@ impl LendingContract {
         };
         save_debt(&env, &borrower, &updated_position);
         env.storage().persistent().set(&col_key, &new_col);
+
+        let debt_token_client = TokenClient::new(&env, &debt_asset);
+        let collateral_token_client = TokenClient::new(&env, &collateral_asset);
+        debt_token_client.transfer(&liquidator, &env.current_contract_address(), &actual_repay);
+        collateral_token_client.transfer(
+            &env.current_contract_address(),
+            &liquidator,
+            &final_seized,
+        );
 
         Ok(actual_repay)
     }
