@@ -231,6 +231,7 @@ fn shutdown_blocks_borrow() {
 #[should_panic(expected = "OperationDisabledDuringShutdown")]
 fn shutdown_blocks_repay() {
     let (_env, client, _cid, _admin, _guardian, user) = setup_with_guardian();
+    client.deposit(&user, &250);
     client.borrow(&user, &100);
     client.set_emergency_state(&EmergencyState::Shutdown);
     client.repay(&user, &10);
@@ -244,8 +245,9 @@ fn shutdown_blocks_repay() {
 #[test]
 fn shutdown_does_not_block_liquidation() {
     let (env, client, _cid, _admin, _guardian, user) = setup_with_guardian();
-    client.deposit(&user, &100);
-    client.borrow(&user, &200);
+    client.deposit(&user, &125);
+    client.borrow(&user, &100);
+    client.withdraw(&user, &25);
     client.set_emergency_state(&EmergencyState::Shutdown);
     let liquidator = Address::generate(&env);
     let result = client.try_liquidate(&liquidator, &user, &100);
@@ -281,6 +283,7 @@ fn recovery_blocks_borrow() {
 #[test]
 fn recovery_allows_repay() {
     let (_env, client, _cid, _admin, _guardian, user) = setup_with_guardian();
+    client.deposit(&user, &250);
     client.borrow(&user, &100);
     client.set_emergency_state(&EmergencyState::Recovery);
     let remaining = client.repay(&user, &40);
